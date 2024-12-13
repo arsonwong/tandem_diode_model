@@ -1,5 +1,7 @@
 import numpy as np
+from tandem_cells.diodes import Stack, SubCell, Diode
 
-array = np.array([1,2,3])
+subcell = SubCell([Diode()]*2)
+d = Stack([subcell]*8)
 
-print(array)
+print(d)
