@@ -41,11 +41,15 @@ class SubCell:
         for diode in self.rev_diodes:
             I += diode.solve_I(-V,VT=VT) 
         if tabulate:
-            indices = np.argsort(I)
-            V_ = V[indices]
-            I_ = I[indices]     
+            V_ = np.copy(V)
+            I_ = np.copy(I)   
+            if V_[-1]>V_[0]:
+                V_ = V_[::-1]
+                I_ = I_[::-1]
             self.IV_table = np.vstack((V_,I_))  
         return I
+    def plot(self):
+        plt.plot(self.IV_table[0,:],self.IV_table[1,:])
 
 class Stack:
     def __init__(self, subcells=[SubCell()], Rs=0):
@@ -74,7 +78,7 @@ class Stack:
                 self.I_range[0] = np.max([self.I_range[0],np.min(cell.IV_table[1,:])])
                 self.I_range[1] = np.min([self.I_range[1],np.max(cell.IV_table[1,:])])
         if self.I_range[0] < self.I_range[1]: #tabulate the two extreme points
-            self.solve_V(np.array(self.I_range))
+            self.solve_V(np.linspace(self.I_range[0],self.I_range[1],1000))
     def solve_V(self,I):
         if not isinstance(I, np.ndarray):
             I = np.array([I])
@@ -91,24 +95,17 @@ class Stack:
             indices = np.argsort(self.IV_table[0,:])
             self.IV_table = self.IV_table[:,indices]
         return V
-    def solve_I(self,V,V_tolerance=1e-5):
-        if not isinstance(V, np.ndarray):
-            V = np.array([V])
-        I = np.ones_like(V) * np.nan
-        indices = np.where((V >= min(self.IV_table[0,:])) & (V <= max(self.IV_table[0,:])))[0]
-        while True:
-            I[indices] = np.interp(V[indices], self.IV_table[0,:], self.IV_table[1,:])
-            Vnew = self.solve_V(I[indices])
-            print(np.max(np.abs(Vnew-V[indices])))
-            if np.max(np.abs(Vnew-V[indices])) < V_tolerance:
-                break
-        return I
+    def plot(self):
+        for cell in self.subcells:
+            cell.plot()
+        plt.plot(self.IV_table[0,:],self.IV_table[1,:])
+        plt.show()
     
 def create_subcell(Isc, Voc, FF, n1, n2, n_rev, I0_rev=1e-15, breakdown_V=-10, VT=VT, name="subcell"):
     max_power = Isc*Voc*FF
     cell = SubCell(diodes=[Diode(n=n1),Diode(n=n2)],rev_diodes=[Diode(n=n_rev,V_shift=-breakdown_V)],IL = Isc, shunt_cond=0,name=name)
-    lower_V = -VT*np.log(Isc/I0_rev)+breakdown_V
-    V = np.hstack((np.linspace(lower_V,breakdown_V,100), np.linspace(breakdown_V*0.99,breakdown_V*0.01,100), np.linspace(0, 2*Voc, 200)))
+    lower_V = -n_rev*VT*np.log(Isc/I0_rev)+breakdown_V
+    V = np.hstack((np.linspace(lower_V,breakdown_V,100), np.linspace(breakdown_V*0.99,breakdown_V*0.01,100), np.linspace(0, Voc+2*VT, 200)))
     # rough guess to start
     cell.diodes[0].I0 = Isc/np.exp(Voc/(n1*VT))
     cell.diodes[1].I0 = 0
@@ -120,15 +117,23 @@ def create_subcell(Isc, Voc, FF, n1, n2, n_rev, I0_rev=1e-15, breakdown_V=-10, V
         Vmp = V[mpp]
         max_power_ = power[mpp]
         denom = cell.diodes[0].solve_I(Voc_)/(n1*VT) + cell.diodes[1].solve_I(Voc_)/(n2*VT)
-        dVoc_dI01 = -np.exp(Voc_/(n1*VT))/denom
-        dVoc_dI02 = -np.exp(Voc_/(n2*VT))/denom
-        dpower_dI01 = -Vmp*np.exp(Vmp/(n1*VT))
-        dpower_dI02 = -Vmp*np.exp(Vmp/(n2*VT))
+        dVoc_dI01 = -np.exp((Voc_-Vmp)/(n1*VT))/denom
+        dVoc_dI02 = -np.exp((Voc_-Vmp)/(n2*VT))/denom
+        dpower_dI01 = -Vmp
+        dpower_dI02 = -Vmp
         M = np.array([[dVoc_dI01, dVoc_dI02],[dpower_dI01, dpower_dI02]])
         Y = np.array([Voc - Voc_, max_power-max_power_])
         x = np.linalg.solve(M, Y)
-        cell.diodes[0].I0 += x[0]
-        cell.diodes[1].I0 += x[1]
+        cell.diodes[0].I0 += x[0]/np.exp(Vmp/(n1*VT))
+        cell.diodes[1].I0 += x[1]/np.exp(Vmp/(n2*VT))
+        if cell.diodes[0].I0 < 0:
+            cell.diodes[0].I0 = 0
+            cell.diodes[1].I0 = Isc/np.exp(Voc/(n2*VT))
+            break
+        if cell.diodes[1].I0 < 0:
+            cell.diodes[1].I0 = 0
+            cell.diodes[0].I0 = Isc/np.exp(Voc/(n1*VT))
+            break
         if np.max(np.abs(Y))<1e-10:
             break
     return cell
