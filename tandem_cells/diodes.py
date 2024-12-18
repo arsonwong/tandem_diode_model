@@ -9,10 +9,18 @@ class Diode:
         self.n = n
         self.IL = 0
         self.V_shift = V_shift
+        self.V = np.nan
+        self.I = np.nan
+        self.dI_dV = np.nan
     def __str__(self):
         return "I0 = " + str(self.I0) + " A, n = " + str(self.n)
-    def solve_I(self, V, VT = VT):
-        return self.I0*np.exp((V-self.V_shift)/(self.n*VT))
+    def solve_I(self, V, VT = VT, log_state=False):
+        I = self.I0*np.exp((V-self.V_shift)/(self.n*VT))
+        if log_state:
+            self.V = V
+            self.I = I
+            self.dI_dV = 1/(self.n*VT)*I
+        return I
 
 class SubCell:
     def __init__(self,diodes=[Diode()],rev_diodes=[],IL = 0, shunt_cond=0,name="subcell"):
@@ -26,28 +34,49 @@ class SubCell:
         self.name = name
         self.IL = IL
         self.IV_table = None
+        self.V = 0 # records the voltage of this subcell
+        self.diode_states = []
     def __str__(self):
         word = ""
         for i, diode in enumerate(self.diodes):
             word += "Diode " + str(i) + ": " + str(diode) + "\n"
         word += "Shunt cond: " + str(self.shunt_cond) + " ohm-1\n"
         return word
-    def solve_I(self, V, IL = None, VT = VT, tabulate=False):
-        if IL is not None:
-            self.IL = IL
+    def solve_I(self, V, VT = VT, tabulate=False, derivative=False):
         I = self.IL - V*self.shunt_cond
+        if derivative:
+            dI_dV = -self.shunt_cond
         for diode in self.diodes:
-            I -= diode.solve_I(V,VT=VT) 
+            I -= diode.solve_I(V,VT=VT,log_state=derivative) 
+            if derivative:
+                dI_dV -= diode.dI_dV
         for diode in self.rev_diodes:
-            I += diode.solve_I(-V,VT=VT) 
+            I += diode.solve_I(-V,VT=VT,log_state=derivative) 
+            if derivative:
+                dI_dV -= diode.dI_dV
         if tabulate:
             V_ = np.copy(V)
             I_ = np.copy(I)   
-            if V_[-1]>V_[0]:
+            if V_[-1]>V_[0]: # arrange in increasing I
                 V_ = V_[::-1]
                 I_ = I_[::-1]
             self.IV_table = np.vstack((V_,I_))  
+        if derivative:
+            return [I,dI_dV]
         return I
+    def solve_V(self, I, VT = VT): # inverse
+        if not isinstance(I, np.ndarray):
+            I = np.array([I])
+        V = np.ones_like(I) * np.nan
+        indices = np.where((I >= self.IV_table[1,0]) & (I <= self.IV_table[1,-1]))[0]
+        V[indices] = np.interp(I[indices], self.IV_table[1,:], self.IV_table[0,:])
+        # iterate to converge
+        for iteration in range(100):
+            [I_, dI_dV_] = self.solve_I(V, VT = VT, derivative=True)
+            if np.max(np.abs(I-I_)) < 1e-12:
+                break
+            V[indices] += (I-I_)/dI_dV_
+        return V
     def plot(self):
         plt.plot(self.IV_table[0,:],self.IV_table[1,:])
 
@@ -83,24 +112,31 @@ class Stack:
         if not isinstance(I, np.ndarray):
             I = np.array([I])
         V = np.ones_like(I) * np.nan
+        V_subcells = np.ones((len(self.subcells),I.shape[0]))
         indices = np.where((I >= self.I_range[0]) & (I <= self.I_range[1]))[0]
-        V[indices] = -I[indices]*self.Rs
+        V[indices] = 0.0
         for i, cell in enumerate(self.subcells):
-            V[indices] += np.interp(I[indices], cell.IV_table[1,:], cell.IV_table[0,:])
-        subtable = np.vstack((V[indices],I[indices]))  
+            V_subcells[i,indices] = cell.solve_V(I)
+            V[indices] += V_subcells[i,indices]
+        V[indices] -= I[indices]*self.Rs
+
+        subtable = np.vstack((V_subcells[:,indices],V[indices],I[indices]))  
         if self.IV_table is None:
             self.IV_table = subtable
         else:
             self.IV_table = np.hstack((self.IV_table,subtable))
-            indices = np.argsort(self.IV_table[0,:])
+            indices = np.argsort(self.IV_table[-2,:])
             self.IV_table = self.IV_table[:,indices]
         return V
     def plot(self):
-        for cell in self.subcells:
-            cell.plot()
-        plt.plot(self.IV_table[0,:],self.IV_table[1,:])
+        for i, cell in enumerate(self.subcells):
+            plt.plot(self.IV_table[i,:],self.IV_table[-1,:])
+        plt.plot(self.IV_table[-2,:],self.IV_table[-1,:])
         plt.show()
-    
+    def build_M(self):
+        for cell in self.subcells:
+            pass
+
 def create_subcell(Isc, Voc, FF, n1, n2, n_rev, I0_rev=1e-15, breakdown_V=-10, VT=VT, name="subcell"):
     max_power = Isc*Voc*FF
     cell = SubCell(diodes=[Diode(n=n1),Diode(n=n2)],rev_diodes=[Diode(n=n_rev,V_shift=-breakdown_V)],IL = Isc, shunt_cond=0,name=name)
